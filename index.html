@@ -131,7 +131,8 @@ button.p .rip,nav button .rip{background:rgba(255,255,255,.5)}
 .tag{transition:transform .2s}.tag:hover{transform:scale(1.08)}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 </style><script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script></head><body><div id="root"></div>
-<script>
+<script><script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
 const $=s=>document.querySelector(s);
 let AC,mute=false;
 function beep(f,d,t,v,f2){if(mute)return;try{AC=AC||new(window.AudioContext||window.webkitAudioContext)();if(AC.state=='suspended')AC.resume();const n=AC.currentTime,o=AC.createOscillator(),g=AC.createGain();o.type=t||'sine';o.frequency.setValueAtTime(f,n);if(f2)o.frequency.exponentialRampToValueAtTime(f2,n+d);g.gain.setValueAtTime(v||.05,n);g.gain.exponentialRampToValueAtTime(.0001,n+d);o.connect(g);g.connect(AC.destination);o.start(n);o.stop(n+d)}catch(e){}}
@@ -408,6 +409,72 @@ else if('mreset' in d){go();setPref('order',[])}
 else if('pw' in d)R(async()=>{const a=await ST.acc(S.user.email),p0=$('#pw0').value,p1=$('#pw1').value,p2=$('#pw2').value;if(await hashPw(p0,a.salt)!==a.hash)return say('Senha atual incorreta.');if(p1.length<8)return say('Informe uma nova senha com pelo menos 8 caracteres.');if(p1!==p2)return say('Informe a mesma senha nos dois campos.');const salt=newSalt(),hash=await hashPw(p1,salt);await ST.updAcc(a.email,{salt,hash});S.user.ph=hash;say('Senha alterada com sucesso.')})
 },true);
 async function initApp(){try{DB=await claude.use('db')}catch(e){DB=null}S.ready=true;draw();await restore();draw()}
+/* ===== Registrar alunos por PDF ===== */
+let PDFL=[];
+
+// 1) Coloca o botão na aba Alunos
+const _al2=V.alunos;
+V.alunos=()=>_al2().replace('<h1>Alunos</h1>',
+ `<h1>Alunos</h1><div class="card row"><button class="p" data-pdf>📄 Registrar com PDF</button><span class="mut">Envie o PDF da turma: só nome e CGM são lidos.</span><input id="pdff" type="file" accept="application/pdf" hidden></div>`);
+
+// 2) Clicar no botão abre a escolha de arquivo
+document.addEventListener('click',e=>{
+  const t=e.target.closest('button');
+  if(t&&'pdf' in t.dataset){
+    if(!D.classes.length)return say('Crie uma turma na aba Turmas antes.');
+    document.getElementById('pdff').click();
+  }
+});
+
+// 3) Quando o arquivo é escolhido, lê o PDF
+document.addEventListener('change',async e=>{
+  if(e.target.id!='pdff')return;
+  const file=e.target.files[0];
+  if(!file)return;
+  try{
+    if(!window.pdfjsLib)return say('Leitor de PDF não carregou. Tente de novo.');
+    const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+    const linhas=[];
+    for(let p=1;p<=pdf.numPages;p++){
+      const pg=await pdf.getPage(p),tc=await pg.getTextContent(),mapa={};
+      tc.items.forEach(it=>{const y=Math.round(it.transform[5]/3);(mapa[y]=mapa[y]||[]).push(it)});
+      Object.keys(mapa).sort((a,b)=>b-a).forEach(y=>{
+        linhas.push(mapa[y].sort((a,b)=>a.transform[4]-b.transform[4]).map(i=>i.str).join(' ').replace(/\s+/g,' ').trim());
+      });
+    }
+    // procura em cada linha: um número com 4+ dígitos (CGM) e um nome com 2+ palavras
+    const vistos=new Set();PDFL=[];
+    linhas.forEach(l=>{
+      const m=l.match(/\b\d{4,}\b/);if(!m)return;
+      const cgm=m[0];
+      const nome=l.replace(cgm,'').replace(/[^A-Za-zÀ-ÿ' .-]/g,' ').replace(/\s+/g,' ').trim();
+      if(nome.split(' ').length<2||vistos.has(cgm))return;
+      vistos.add(cgm);PDFL.push({name:nome,cgm});
+    });
+    if(!PDFL.length)return say('Não encontrei nome e CGM neste PDF. Ele pode ser um PDF escaneado (imagem).');
+    modal('Registrar alunos com PDF',
+      `<p class="mut">Encontrei ${PDFL.length} aluno(s). Desmarque o que não for aluno.</p>
+       <select id="pdfcls">${D.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+       ${PDFL.map((a,i)=>`<label><input type="checkbox" data-i="${i}" checked> ${esc(a.name)} · ${esc(a.cgm)}</label>`).join('')}`,
+      'Cadastrar selecionados',
+      async()=>{
+        const cls=$('#pdfcls').value;
+        const marcados=[...document.querySelectorAll('.md input[data-i]:checked')].map(i=>PDFL[+i.dataset.i]);
+        let ok=0,dup=0,outra=0;
+        for(const a of marcados){
+          if(D.students.some(s=>s.cgm==a.cgm)){dup++;continue}
+          const o=await ST.ix(a.cgm);
+          if(o&&o!==school().name){outra++;continue}
+          D.students.push({id:'n'+Date.now()+Math.random().toString(36).slice(2,5),name:a.name,cgm:a.cgm,cls});
+          ok++;
+        }
+        S.modal=null;
+        log('Cadastrou alunos por PDF',ok+' aluno(s) em '+cn(cls));
+        say(ok+' aluno(s) cadastrado(s).'+(dup?' '+dup+' já existiam.':'')+(outra?' '+outra+' são de outro colégio.':''));
+      });
+  }catch(x){say('Não consegui ler este PDF.')}
+  e.target.value='';
+});
 initApp();
 
 </script></body></html>
